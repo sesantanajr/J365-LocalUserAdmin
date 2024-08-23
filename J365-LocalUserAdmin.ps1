@@ -1,3 +1,8 @@
+#####################################
+##### Jornada 365 | Admin Local ##### 
+#####      jornada365.cloud     #####
+#####################################
+
 # Verificacao do Sistema Operacional
 $osVersion = [System.Environment]::OSVersion.Version
 $isWindows10Or11 = $false
