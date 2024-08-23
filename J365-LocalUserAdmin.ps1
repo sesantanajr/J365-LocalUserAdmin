@@ -3,93 +3,149 @@
 #####      jornada365.cloud     #####
 #####################################
 
-# Verificacao do Sistema Operacional
-$osVersion = [System.Environment]::OSVersion.Version
-$isWindows10Or11 = $false
+# Definição das variáveis
+$Username = "helpdesk"
+$Password = ConvertTo-SecureString "@367Mund*17" -AsPlainText -Force
+$LogFile = "C:\Windows\Temp\CriarAdminLocal.log"
 
-if ($osVersion.Major -eq 10 -and ($osVersion.Build -ge 10240 -and $osVersion.Build -lt 22000)) {
-    $isWindows10Or11 = $true
-} elseif ($osVersion.Major -eq 10 -and $osVersion.Build -ge 22000) {
-    $isWindows10Or11 = $true
+# Função para logging com níveis de severidade
+function Write-Log {
+    param (
+        [string]$message,
+        [string]$level = "INFO"
+    )
+    $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    $logEntry = "$timestamp [$level] - $message"
+    Add-Content -Path $LogFile -Value $logEntry
+    Write-Host $logEntry
 }
 
-if (-not $isWindows10Or11) {
-    Write-Host "Sistema operacional incompativel. Saindo do script."
-    Exit
+# Função para verificar se o usuário existe usando Get-CimInstance
+function User-Exists {
+    param([string]$username)
+    $user = Get-CimInstance -ClassName Win32_UserAccount -Filter "Name='$username' AND LocalAccount=True"
+    return ($null -ne $user)
 }
 
-Write-Host "Sistema operacional compativel. Continuando..."
-
-# Nome do usuario e senha
-$username = "Administrador"
-$password = "@367Mund*17"
-$logFileBase = "C:\Windows\Temp\CriarAdminLocal"
-$logFile = "$logFileBase.log"
-
-# Gerenciando o arquivo de log
-if (Test-Path $logFile) {
-    $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-    $logFile = "$logFileBase_$timestamp.log"
-}
-
-# Redirecionando a saida para um arquivo de log
-Start-Transcript -Path $logFile
-
-# Verifica se o usuario ja existe
-$user = Get-LocalUser -Name $username -ErrorAction SilentlyContinue
-
-if ($user -eq $null) {
-    Write-Host "Usuario $username nao existe. Criando..."
-    
-    # Criando o usuario 'helpdesk'
-    New-LocalUser -Name $username -Password (ConvertTo-SecureString $password -AsPlainText -Force) -FullName "Helpdesk User" -Description "Conta criada para suporte tecnico" -UserMayNotChangePassword -PasswordNeverExpires
-    Write-Host "Usuario $username criado."
-} else {
-    Write-Host "O usuario $username ja existe."
-}
-
-# Forca a criacao do perfil do usuario atraves de logon temporario
-$profilePath = "C:\Users\$username"
-if (-Not (Test-Path $profilePath)) {
-    Write-Host "Perfil do usuario $username nao encontrado. Tentando forcar a criacao do perfil..."
-    
-    try {
-        Start-Process -FilePath "cmd.exe" -ArgumentList "/c", "exit" -Credential (New-Object System.Management.Automation.PSCredential($username, (ConvertTo-SecureString $password -AsPlainText -Force))) -NoNewWindow -Wait
-        Write-Host "Processo temporario iniciado para criar o perfil do usuario."
-    } catch {
-        Write-Error "Erro ao forcar a criacao do perfil do usuario. Detalhes: $_"
-        Exit 1
-    }
-    
-    # Verifica novamente se a pasta do perfil foi criada
-    if (Test-Path $profilePath) {
-        Write-Host "O perfil do usuario $username foi criado com sucesso em $profilePath."
+# Função para criar ou atualizar o usuário
+function Manage-User {
+    if (User-Exists $Username) {
+        Write-Log "Usuário $Username já existe. Atualizando a senha."
+        try {
+            $user = [ADSI]"WinNT://$env:COMPUTERNAME/$Username,user"
+            $user.SetPassword($Password.ToString())
+            $user.SetInfo()
+            Write-Log "Senha do usuário $Username atualizada com sucesso."
+        } catch {
+            Write-Log "Erro ao atualizar a senha do usuário: $($_.Exception.Message)" "ERROR"
+            return $false
+        }
     } else {
-        Write-Host "Falha ao criar o perfil do usuario $username em $profilePath."
-        Exit 1
+        Write-Log "Criando novo usuário $Username."
+        try {
+            $computer = [ADSI]"WinNT://$env:COMPUTERNAME,computer"
+            $user = $computer.Create("User", $Username)
+            $user.SetPassword($Password.ToString())
+            $user.UserFlags = 65536 # ADS_UF_DONT_EXPIRE_PASSWD
+            $user.SetInfo()
+            Write-Log "Usuário $Username criado com sucesso."
+        } catch {
+            Write-Log "Erro ao criar o usuário: $($_.Exception.Message)" "ERROR"
+            return $false
+        }
     }
-} else {
-    Write-Host "O perfil do usuario $username ja existe em $profilePath."
+    return $true
 }
 
-# Identificando o nome do grupo Administradores no idioma local
-$adminGroupName = (Get-LocalGroup | Where-Object { $_.SID -eq 'S-1-5-32-544' }).Name
-
-if (-not $adminGroupName) {
-    Write-Error "Falha ao localizar o grupo de Administradores usando o SID."
-    Exit 1
+# Função para obter o nome do grupo de Administradores
+function Get-AdminGroupName {
+    try {
+        $adminGroup = Get-CimInstance -ClassName Win32_Group -Filter "SID='S-1-5-32-544'"
+        return $adminGroup.Name
+    } catch {
+        Write-Log "Erro ao obter o grupo de administradores: $($_.Exception.Message)" "ERROR"
+        return $null
+    }
 }
 
-# Adicionando o usuario ao grupo de Administradores
+# Função para adicionar o usuário ao grupo de Administradores
+function Add-To-Admins {
+    $adminGroupName = Get-AdminGroupName
+    if ($null -eq $adminGroupName) {
+        Write-Log "Não foi possível encontrar o grupo de Administradores." "ERROR"
+        return $false
+    }
+
+    try {
+        $group = [ADSI]"WinNT://$env:COMPUTERNAME/$adminGroupName,group"
+        $members = @($group.Invoke("Members"))
+        $isMember = $members | ForEach-Object { $_.GetType().InvokeMember("Name", 'GetProperty', $null, $_, $null) } | Where-Object { $_ -eq $Username }
+
+        if ($isMember) {
+            Write-Log "Usuário $Username já é membro do grupo $adminGroupName."
+        } else {
+            $group.Add("WinNT://$env:COMPUTERNAME/$Username,user")
+            Write-Log "Usuário $Username adicionado ao grupo $adminGroupName com sucesso."
+        }
+        return $true
+    } catch {
+        Write-Log "Erro ao adicionar o usuário ao grupo de Administradores: $($_.Exception.Message)" "ERROR"
+        return $false
+    }
+}
+
+# Função para criar o perfil do usuário no C:\Users usando robocopy com exclusão de junction points
+function Create-UserProfile {
+    $profilePath = "C:\Users\$Username"
+
+    if (-Not (Test-Path $profilePath)) {
+        Write-Log "Perfil do usuário $Username não encontrado. Criando perfil padrão..."
+
+        try {
+            # Usar Start-Process para rodar robocopy com exclusão de junction points (/XJ)
+            $cmd = "robocopy C:\Users\Default $profilePath /MIR /R:3 /W:5 /XJ"
+            Write-Log "Executando: $cmd"
+            $process = Start-Process -FilePath "cmd.exe" -ArgumentList "/c $cmd" -Wait -NoNewWindow -PassThru
+
+            if ($process.ExitCode -eq 0) {
+                Write-Log "Perfil padrão criado com sucesso para o usuário $Username."
+            } else {
+                throw "O robocopy retornou um código de erro: $($process.ExitCode)."
+            }
+        } catch {
+            Write-Log "Erro ao criar o perfil do usuário: $($_.Exception.Message)" "ERROR"
+            return $false
+        }
+    } else {
+        Write-Log "O perfil do usuário $Username já existe em $profilePath."
+        return $true
+    }
+}
+
+# Execução principal
 try {
-    Add-LocalGroupMember -Group $adminGroupName -Member $username
-    Write-Host "Usuario $username adicionado ao grupo $adminGroupName com sucesso."
+    Write-Log "Iniciando script"
+
+    $userManaged = Manage-User
+    if (-not $userManaged) {
+        throw "Falha ao gerenciar o usuário."
+    }
+
+    $adminAdded = Add-To-Admins
+    if (-not $adminAdded) {
+        throw "Falha ao adicionar o usuário ao grupo de Administradores."
+    }
+
+    $profileCreated = Create-UserProfile
+    if (-not $profileCreated) {
+        throw "Falha ao criar o perfil do usuário."
+    }
+
+    Write-Log "Todas as etapas foram concluídas com êxito."
 } catch {
-    Write-Error "Falha ao adicionar o usuario $username ao grupo $adminGroupName. Detalhes: $_"
-    Exit 1
+    Write-Log "Ocorreu um erro inesperado: $($_.Exception.Message)" "ERROR"
+    exit 1
+} finally {
+    Write-Log "Encerrando script."
 }
 
-# Encerrando a transcricao do log se estiver ativa
-if ($transcript = (Get-Variable -Name "Transcribing" -ValueOnly -ErrorAction SilentlyContinue)) {
-    Stop-Transcript
-}
