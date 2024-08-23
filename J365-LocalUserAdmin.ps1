@@ -1,86 +1,90 @@
-##### J365-LocalUserAdmin
-# Defina o nome do usuário, senha e o arquivo de log
-$Username = "helpdesk"
-$Password = ConvertTo-SecureString "@365Mund@354" -AsPlainText -Force
-$LogDirectory = "C:\Logs"
-$LogFile = "$LogDirectory\CriarAdminLocal.log"
+# Verificacao do Sistema Operacional
+$osVersion = [System.Environment]::OSVersion.Version
+$isWindows10Or11 = $false
 
-# Função para logar mensagens
-function Log-Message {
-    param (
-        [string]$Message,
-        [string]$LogType = "INFO"
-    )
-    $Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    $LogEntry = "$Timestamp [$LogType] - $Message"
-    Write-Host $LogEntry
+if ($osVersion.Major -eq 10 -and ($osVersion.Build -ge 10240 -and $osVersion.Build -lt 22000)) {
+    $isWindows10Or11 = $true
+} elseif ($osVersion.Major -eq 10 -and $osVersion.Build -ge 22000) {
+    $isWindows10Or11 = $true
+}
+
+if (-not $isWindows10Or11) {
+    Write-Host "Sistema operacional incompativel. Saindo do script."
+    Exit
+}
+
+Write-Host "Sistema operacional compativel. Continuando..."
+
+# Nome do usuario e senha
+$username = "Administrador"
+$password = "@367Mund*17"
+$logFileBase = "C:\Windows\Temp\CriarAdminLocal"
+$logFile = "$logFileBase.log"
+
+# Gerenciando o arquivo de log
+if (Test-Path $logFile) {
+    $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+    $logFile = "$logFileBase_$timestamp.log"
+}
+
+# Redirecionando a saida para um arquivo de log
+Start-Transcript -Path $logFile
+
+# Verifica se o usuario ja existe
+$user = Get-LocalUser -Name $username -ErrorAction SilentlyContinue
+
+if ($user -eq $null) {
+    Write-Host "Usuario $username nao existe. Criando..."
+    
+    # Criando o usuario 'helpdesk'
+    New-LocalUser -Name $username -Password (ConvertTo-SecureString $password -AsPlainText -Force) -FullName "Helpdesk User" -Description "Conta criada para suporte tecnico" -UserMayNotChangePassword -PasswordNeverExpires
+    Write-Host "Usuario $username criado."
+} else {
+    Write-Host "O usuario $username ja existe."
+}
+
+# Forca a criacao do perfil do usuario atraves de logon temporario
+$profilePath = "C:\Users\$username"
+if (-Not (Test-Path $profilePath)) {
+    Write-Host "Perfil do usuario $username nao encontrado. Tentando forcar a criacao do perfil..."
+    
     try {
-        Add-Content -Path $LogFile -Value $LogEntry
+        Start-Process -FilePath "cmd.exe" -ArgumentList "/c", "exit" -Credential (New-Object System.Management.Automation.PSCredential($username, (ConvertTo-SecureString $password -AsPlainText -Force))) -NoNewWindow -Wait
+        Write-Host "Processo temporario iniciado para criar o perfil do usuario."
     } catch {
-        Write-Host "Falha ao gravar no arquivo de log. Detalhes: $_" -ForegroundColor Red
+        Write-Error "Erro ao forcar a criacao do perfil do usuario. Detalhes: $_"
+        Exit 1
     }
-}
-
-# Criar diretório de log se não existir
-if (-not (Test-Path $LogDirectory)) {
-    try {
-        New-Item -Path $LogDirectory -ItemType Directory -Force
-        Log-Message "Diretório de log $LogDirectory criado com sucesso."
-    } catch {
-        Write-Host "Não foi possível criar o diretório de log. Detalhes: $_" -ForegroundColor Red
-        exit 1
+    
+    # Verifica novamente se a pasta do perfil foi criada
+    if (Test-Path $profilePath) {
+        Write-Host "O perfil do usuario $username foi criado com sucesso em $profilePath."
+    } else {
+        Write-Host "Falha ao criar o perfil do usuario $username em $profilePath."
+        Exit 1
     }
+} else {
+    Write-Host "O perfil do usuario $username ja existe em $profilePath."
 }
 
-# Iniciar o log
-Log-Message "Iniciando o script de criação de usuário."
+# Identificando o nome do grupo Administradores no idioma local
+$adminGroupName = (Get-LocalGroup | Where-Object { $_.SID -eq 'S-1-5-32-544' }).Name
 
-# Validar se a senha cumpre requisitos básicos
-if ($Password.Length -lt 8) {
-    Log-Message "A senha fornecida é muito curta. A senha deve ter pelo menos 8 caracteres." "ERROR"
-    exit 1
+if (-not $adminGroupName) {
+    Write-Error "Falha ao localizar o grupo de Administradores usando o SID."
+    Exit 1
 }
 
-# Função para encontrar o nome correto do grupo de Administradores
-function Get-AdministratorsGroup {
-    $GroupNames = @("Administrators", "Administradores", "Administratoren", "Администраторы", "Amministratori", "Administradorzy", "Адміністратори", "管理员")
-    foreach ($Name in $GroupNames) {
-        try {
-            $Group = Get-LocalGroup -Name $Name -ErrorAction Stop
-            return $Name
-        } catch {
-            continue
-        }
-    }
-    Log-Message "Nenhum grupo de administradores encontrado neste sistema." "ERROR"
-    exit 1
-}
-
-$GroupName = Get-AdministratorsGroup
-
-# Criação do usuário
+# Adicionando o usuario ao grupo de Administradores
 try {
-    $UserExists = Get-LocalUser -Name $Username -ErrorAction Stop
-    Log-Message "Usuário $Username já existe. Atualizando a senha."
-    $UserExists | Set-LocalUser -Password $Password
+    Add-LocalGroupMember -Group $adminGroupName -Member $username
+    Write-Host "Usuario $username adicionado ao grupo $adminGroupName com sucesso."
 } catch {
-    try {
-        Log-Message "Criando o usuário $Username."
-        New-LocalUser -Name $Username -Password $Password -FullName "Helpdesk" -Description "Conta de administrador local" -PasswordNeverExpires -AccountNeverExpires
-    } catch {
-        Log-Message "Erro ao tentar criar o usuário $Username. Detalhes: $_" "ERROR"
-        exit 1
-    }
+    Write-Error "Falha ao adicionar o usuario $username ao grupo $adminGroupName. Detalhes: $_"
+    Exit 1
 }
 
-# Adicionar o usuário ao grupo de administradores
-try {
-    Remove-LocalGroupMember -Group $GroupName -Member $Username -ErrorAction SilentlyContinue
-    Add-LocalGroupMember -Group $GroupName -Member $Username -ErrorAction Stop
-    Log-Message "Usuário $Username foi adicionado ao grupo $GroupName com sucesso."
-} catch {
-    Log-Message "Erro ao tentar adicionar o usuário $Username ao grupo $GroupName. Detalhes: $_" "ERROR"
-    exit 1
+# Encerrando a transcricao do log se estiver ativa
+if ($transcript = (Get-Variable -Name "Transcribing" -ValueOnly -ErrorAction SilentlyContinue)) {
+    Stop-Transcript
 }
-
-Log-Message "Script concluído com sucesso."
